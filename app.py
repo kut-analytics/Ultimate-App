@@ -1,3 +1,18 @@
+HOW TO USE THIS FILE
+====================
+1. Select everything under "APP.PY" below (up to but not including
+   REQUIREMENTS.TXT), copy it.
+2. Go to app.py in your GitHub repo (kut-analytics/Ultimate-App), click
+   the pencil/edit icon, select all existing content, paste this over it,
+   commit to main.
+3. Do the same for the REQUIREMENTS.TXT section into the file of that name.
+4. Streamlit Cloud redeploys automatically once you commit.
+
+
+================================================================
+APP.PY
+================================================================
+
 """
 Mwangaza Intelligence Chat -- friends & family test build.
 
@@ -129,33 +144,92 @@ def run_query(filters: dict, limit: int = 200):
     return rows
 
 
+def run_monthly_counts(filters: dict):
+    """Real counts by month and by assertion_status, using the same filters
+    as run_query. This is what a trend/frequency question should actually be
+    answered from -- not a sample of individual rows, which biases toward
+    whichever slice happened to be shown to the model."""
+    conn = get_connection()
+    clauses = ["validation_status = 'accepted'"]
+    params = []
+    if filters.get("county"):
+        clauses.append("admin1_canonical = %s")
+        params.append(filters["county"])
+    if filters.get("intelligence_area"):
+        clauses.append("intelligence_area = %s")
+        params.append(filters["intelligence_area"])
+    if filters.get("instability_type"):
+        clauses.append("instability_type = %s")
+        params.append(filters["instability_type"])
+    if filters.get("date_start"):
+        clauses.append("date_occurred >= %s")
+        params.append(filters["date_start"])
+    if filters.get("date_end"):
+        clauses.append("date_occurred <= %s")
+        params.append(filters["date_end"])
+    if filters.get("keyword"):
+        clauses.append("description ILIKE %s")
+        params.append(f"%{filters['keyword']}%")
+
+    query = f"""
+        SELECT to_char(date_occurred, 'YYYY-MM') AS month,
+               assertion_status,
+               count(*) AS n
+        FROM observations
+        WHERE {' AND '.join(clauses)}
+        GROUP BY month, assertion_status
+        ORDER BY month
+    """
+    cur = conn.cursor()
+    cur.execute(query, params)
+    counts = cur.fetchall()
+    cur.close()
+    return counts
+
+
 SYNTHESIS_PROMPT = """You answer questions about Kenya political violence and instability using
-ONLY the observation rows provided. Never state anything not supported by a row.
+ONLY the data provided. Never state anything not supported by it.
+
+You get two things:
+1. MONTHLY COUNTS -- the real, complete count of observations per month per
+   assertion_status for this filter. This is the authoritative source for any
+   question about trend, frequency, or change over time -- always ground a
+   trend answer in these counts, not in the sample rows below.
+2. SAMPLE ROWS -- a representative sample of individual observations (not
+   necessarily all of them) to cite specific examples and evidence.
 
 Rules:
-- If a row's assertion_status is "alleged", "warned against", "denied", "advisory", or
-  "hypothetical", say so plainly -- never present it as a confirmed occurrence.
-- If a row's temporal_status is "retrospective reference", note it's a reference to an
-  earlier period, not a new event.
-- If no rows are returned, say plainly that the register has no matching observations --
-  do not guess or fill in general knowledge.
-- Keep the answer to 2-4 sentences. Be specific about counts, locations and dates when
-  the rows support it.
+- If a row or count's assertion_status is "alleged", "warned against", "denied",
+  "advisory", or "hypothetical", say so plainly -- never present it as a
+  confirmed occurrence. When summarizing a trend, note if a large share of
+  the count is non-occurrence (warnings, advisories) rather than confirmed events.
+- If nothing is returned, say plainly that the register has no matching
+  observations -- do not guess or fill in general knowledge.
+- Keep the answer to 2-5 sentences. Be specific about counts, locations and
+  dates when the data supports it.
 """
 
 
-def synthesize_answer(question: str, rows: list) -> str:
-    if not rows:
+def synthesize_answer(question: str, rows: list, monthly_counts: list) -> str:
+    if not rows and not monthly_counts:
         return "The register has no observations matching that question."
+
+    counts_text = "\n".join(f"- {month} | {status}: {n}" for month, status, n in monthly_counts) or "none"
+
+    # Sample spread evenly across the full result set, not just the newest
+    # rows, so a trend question sees the whole date range, not just its tail.
+    sample = rows if len(rows) <= 40 else rows[::max(1, len(rows) // 40)][:40]
     rows_text = "\n".join(
         f"- {r['date_occurred']} | {r['admin1_canonical']} | {r['assertion_status']} | "
         f"{r['temporal_status']} | {r['description']}"
-        for r in rows[:40]
-    )
+        for r in sample
+    ) or "none"
+
     resp = client.messages.create(
-        model=MODEL, max_tokens=400,
+        model=MODEL, max_tokens=500,
         system=[{"type": "text", "text": SYNTHESIS_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": f"QUESTION: {question}\n\nOBSERVATIONS:\n{rows_text}"}],
+        messages=[{"role": "user", "content":
+                   f"QUESTION: {question}\n\nMONTHLY COUNTS:\n{counts_text}\n\nSAMPLE ROWS:\n{rows_text}"}],
     )
     return "".join(b.text for b in resp.content if b.type == "text")
 
@@ -226,7 +300,8 @@ if question:
         with st.spinner("Searching the register..."):
             filters = parse_filters(question)
             rows = run_query(filters)
-            answer = synthesize_answer(question, rows)
+            monthly_counts = run_monthly_counts(filters)
+            answer = synthesize_answer(question, rows, monthly_counts)
         st.write(answer)
         if rows:
             st.dataframe(
@@ -244,3 +319,12 @@ if question:
                 hide_index=True,
             )
     st.session_state.history.append({"question": question, "answer": answer, "rows": rows})
+
+
+================================================================
+REQUIREMENTS.TXT
+================================================================
+
+streamlit
+psycopg2-binary
+anthropic
