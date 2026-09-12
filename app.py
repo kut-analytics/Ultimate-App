@@ -1,17 +1,3 @@
-HOW TO USE THIS FILE
-====================
-1. Select everything under "APP.PY" below (up to but not including
-   REQUIREMENTS.TXT), copy it.
-2. Go to app.py in your GitHub repo (kut-analytics/Ultimate-App), click
-   the pencil/edit icon, select all existing content, paste this over it,
-   commit to main.
-3. Do the same for the REQUIREMENTS.TXT section into the file of that name.
-4. Streamlit Cloud redeploys automatically once you commit.
-
-
-================================================================
-APP.PY
-================================================================
 
 """
 Mwangaza Intelligence Chat -- friends & family test build.
