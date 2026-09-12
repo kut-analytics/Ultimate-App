@@ -156,8 +156,9 @@ def run_monthly_counts(filters: dict):
         clauses.append("description ILIKE %s")
         params.append(f"%{filters['keyword']}%")
 
+    clauses.append("date_occurred IS NOT NULL AND date_occurred <> ''")
     query = f"""
-        SELECT to_char(date_occurred, 'YYYY-MM') AS month,
+        SELECT left(date_occurred, 7) AS month,
                assertion_status,
                count(*) AS n
         FROM observations
