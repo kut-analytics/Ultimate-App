@@ -29,7 +29,12 @@ client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 @st.cache_resource
 def get_connection():
-    return psycopg2.connect(PG_CONN_STRING, connect_timeout=10)
+    conn = psycopg2.connect(PG_CONN_STRING, connect_timeout=10)
+    # autocommit so one failed query never poisons the cached connection for
+    # every question after it -- without this, a single bad query leaves the
+    # transaction stuck in a failed state until the app is restarted.
+    conn.autocommit = True
+    return conn
 
 
 # Known vocabulary -- the filter-parsing step is only allowed to pick from
