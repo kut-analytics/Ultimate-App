@@ -1,4 +1,3 @@
-
 """
 Mwangaza Intelligence Chat -- friends & family test build.
 
@@ -305,12 +304,3 @@ if question:
                 hide_index=True,
             )
     st.session_state.history.append({"question": question, "answer": answer, "rows": rows})
-
-
-================================================================
-REQUIREMENTS.TXT
-================================================================
-
-streamlit
-psycopg2-binary
-anthropic
