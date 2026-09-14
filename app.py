@@ -226,7 +226,10 @@ def synthesize_answer(question: str, rows: list, monthly_counts: list) -> str:
     if not rows and not monthly_counts:
         return "The register has no observations matching that question."
 
-    counts_text = "\n".join(f"- {month} | {status}: {n}" for month, status, n in monthly_counts) or "none"
+    counts_text = "\n".join(
+        f"- {month} | temporal_status={temporal_status} | confirmed_incident={is_confirmed} | count={n}"
+        for month, temporal_status, is_confirmed, n in monthly_counts
+    ) or "none"
 
     # Sample spread evenly across the full result set, not just the newest
     # rows, so a trend question sees the whole date range, not just its tail.
