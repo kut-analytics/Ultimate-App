@@ -96,34 +96,44 @@ def parse_filters(question: str) -> dict:
 
 def run_query(filters: dict, limit: int = 200):
     conn = get_connection()
-    clauses = ["validation_status = 'accepted'"]
+    clauses = ["fe.date_occurred IS NOT NULL"]
     params = []
 
     if filters.get("county"):
-        clauses.append("admin1_canonical = %s")
+        clauses.append("dl.county = %s")
         params.append(filters["county"])
     if filters.get("intelligence_area"):
-        clauses.append("intelligence_area = %s")
+        clauses.append("fe.intelligence_area = %s")
         params.append(filters["intelligence_area"])
     if filters.get("instability_type"):
-        clauses.append("instability_type = %s")
+        clauses.append("fe.instability_type = %s")
         params.append(filters["instability_type"])
     if filters.get("date_start"):
-        clauses.append("date_occurred >= %s")
+        clauses.append("fe.date_occurred >= %s")
         params.append(filters["date_start"])
     if filters.get("date_end"):
-        clauses.append("date_occurred <= %s")
+        clauses.append("fe.date_occurred <= %s")
         params.append(filters["date_end"])
     if filters.get("keyword"):
-        clauses.append("description ILIKE %s")
+        clauses.append("(o1.description ILIKE %s OR o2.description ILIKE %s)")
+        params.append(f"%{filters['keyword']}%")
         params.append(f"%{filters['keyword']}%")
 
     query = f"""
-        SELECT observation_id, date_occurred, admin1_canonical, temporal_status,
-               assertion_status, description, evidence_sentence, source_outlet, source_url
-        FROM observations
+        SELECT fe.event_id, fe.date_occurred, dl.county, dl.constituency, fe.temporal_status,
+               fe.assertion_status, fe.is_confirmed_incident, fe.figure_confidence,
+               fe.confirmed_fatalities, fe.confirmed_injuries, fe.confirmed_arrests,
+               COALESCE(o1.description, o2.description) AS description,
+               COALESCE(o1.evidence_sentence, o2.evidence_sentence) AS evidence_sentence,
+               COALESCE(o1.source_outlet, o2.source_outlet) AS source_outlet,
+               COALESCE(o1.source_url, o2.source_url) AS source_url
+        FROM fact_events fe
+        LEFT JOIN dim_location dl ON dl.location_id = fe.location_id
+        LEFT JOIN observations o1 ON o1.observation_id = fe.event_id
+        LEFT JOIN event_resolutions er ON er.resolution_id = fe.event_id
+        LEFT JOIN observations o2 ON o2.observation_id = er.basis_observation_id
         WHERE {' AND '.join(clauses)}
-        ORDER BY date_occurred DESC
+        ORDER BY fe.date_occurred DESC
         LIMIT {limit}
     """
     cur = conn.cursor()
@@ -135,40 +145,46 @@ def run_query(filters: dict, limit: int = 200):
 
 
 def run_monthly_counts(filters: dict):
-    """Real counts by month and by assertion_status, using the same filters
-    as run_query. This is what a trend/frequency question should actually be
-    answered from -- not a sample of individual rows, which biases toward
-    whichever slice happened to be shown to the model."""
+    """Real counts by month, using fact_events -- one row per real event,
+    already deduplicated, with temporal_status kept separate from raw
+    assertion_status so a trend question doesn't conflate a retrospective
+    reference or a future warning with something that actually happened
+    in that month."""
     conn = get_connection()
-    clauses = ["validation_status = 'accepted'"]
+    clauses = ["fe.date_occurred IS NOT NULL"]
     params = []
     if filters.get("county"):
-        clauses.append("admin1_canonical = %s")
+        clauses.append("dl.county = %s")
         params.append(filters["county"])
     if filters.get("intelligence_area"):
-        clauses.append("intelligence_area = %s")
+        clauses.append("fe.intelligence_area = %s")
         params.append(filters["intelligence_area"])
     if filters.get("instability_type"):
-        clauses.append("instability_type = %s")
+        clauses.append("fe.instability_type = %s")
         params.append(filters["instability_type"])
     if filters.get("date_start"):
-        clauses.append("date_occurred >= %s")
+        clauses.append("fe.date_occurred >= %s")
         params.append(filters["date_start"])
     if filters.get("date_end"):
-        clauses.append("date_occurred <= %s")
+        clauses.append("fe.date_occurred <= %s")
         params.append(filters["date_end"])
     if filters.get("keyword"):
-        clauses.append("description ILIKE %s")
+        clauses.append("(o1.description ILIKE %s OR o2.description ILIKE %s)")
+        params.append(f"%{filters['keyword']}%")
         params.append(f"%{filters['keyword']}%")
 
-    clauses.append("date_occurred IS NOT NULL AND date_occurred <> ''")
     query = f"""
-        SELECT left(date_occurred, 7) AS month,
-               assertion_status,
+        SELECT to_char(fe.date_occurred, 'YYYY-MM') AS month,
+               fe.temporal_status,
+               fe.is_confirmed_incident,
                count(*) AS n
-        FROM observations
+        FROM fact_events fe
+        LEFT JOIN dim_location dl ON dl.location_id = fe.location_id
+        LEFT JOIN observations o1 ON o1.observation_id = fe.event_id
+        LEFT JOIN event_resolutions er ON er.resolution_id = fe.event_id
+        LEFT JOIN observations o2 ON o2.observation_id = er.basis_observation_id
         WHERE {' AND '.join(clauses)}
-        GROUP BY month, assertion_status
+        GROUP BY month, fe.temporal_status, fe.is_confirmed_incident
         ORDER BY month
     """
     cur = conn.cursor()
@@ -182,12 +198,17 @@ SYNTHESIS_PROMPT = """You answer questions about Kenya political violence and in
 ONLY the data provided. Never state anything not supported by it.
 
 You get two things:
-1. MONTHLY COUNTS -- the real, complete count of observations per month per
-   assertion_status for this filter. This is the authoritative source for any
-   question about trend, frequency, or change over time -- always ground a
-   trend answer in these counts, not in the sample rows below.
-2. SAMPLE ROWS -- a representative sample of individual observations (not
-   necessarily all of them) to cite specific examples and evidence.
+1. MONTHLY COUNTS -- the real, complete, DEDUPLICATED count of distinct events per month
+   from the reporting mart, broken down by temporal_status and whether each is a confirmed
+   incident. This is the authoritative source for any question about trend, frequency, or
+   change over time -- always ground a trend answer in these counts, not in the sample rows.
+   IMPORTANT: only "current period occurrence" rows where is_confirmed_incident is true are
+   actual events that happened in that month. "retrospective reference" rows are mentions of
+   earlier events (e.g. 2024, 2007-2008), not new incidents -- never count them as part of a
+   trend for the period being asked about. "anticipatory statement" rows are about the future
+   or hypothetical, not something that has happened.
+2. SAMPLE ROWS -- a representative sample of individual events (not necessarily all of them)
+   to cite specific examples and evidence.
 
 Rules:
 - If a row or count's assertion_status is "alleged", "warned against", "denied",
@@ -211,8 +232,8 @@ def synthesize_answer(question: str, rows: list, monthly_counts: list) -> str:
     # rows, so a trend question sees the whole date range, not just its tail.
     sample = rows if len(rows) <= 40 else rows[::max(1, len(rows) // 40)][:40]
     rows_text = "\n".join(
-        f"- {r['date_occurred']} | {r['admin1_canonical']} | {r['assertion_status']} | "
-        f"{r['temporal_status']} | {r['description']}"
+        f"- {r['date_occurred']} | {r['county']} | temporal_status={r['temporal_status']} | "
+        f"assertion={r['assertion_status']} | confirmed_incident={r['is_confirmed_incident']} | {r['description']}"
         for r in sample
     ) or "none"
 
@@ -273,7 +294,7 @@ for entry in st.session_state.history:
                 [
                     {
                         "Date": r["date_occurred"],
-                        "County": r["admin1_canonical"],
+                        "County": r["county"],
                         "Status": r["assertion_status"],
                         "Evidence": r["evidence_sentence"],
                         "Source": r["source_outlet"],
@@ -299,7 +320,7 @@ if question:
                 [
                     {
                         "Date": r["date_occurred"],
-                        "County": r["admin1_canonical"],
+                        "County": r["county"],
                         "Status": r["assertion_status"],
                         "Evidence": r["evidence_sentence"],
                         "Source": r["source_outlet"],
